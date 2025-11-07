@@ -1,0 +1,13 @@
+services:
+  hoyo-slack:
+    build: .
+    container_name: hoyo-slack
+    env_file: .env
+    environment:
+      SCHEDULE_HOURS: "5"
+      RESIN_ALERT_THRESHOLDS: "120,160"
+      DATA_DIR: "/data"
+      CHARACTER_SUMMARY_TOP: "0"   # set to e.g. "4" to include top 4 characters
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
