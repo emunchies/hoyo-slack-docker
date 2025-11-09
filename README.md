@@ -70,7 +70,7 @@ Runs in a self-contained loop every 5 hours.
 Your .env controls everything:
 
 HOYO_TOKEN=xxx
-GENSHIN_UID=660844071
+GENSHIN_UID=xxxxxxxxx
 GENSHIN_SERVER=NA
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxxx
 
