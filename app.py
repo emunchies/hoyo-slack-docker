@@ -5,11 +5,13 @@ import asyncio
 import datetime as dt
 import logging
 from zoneinfo import ZoneInfo
+from pathlib import Path  # <-- added
 
 import requests
 from dotenv import load_dotenv
 import genshin
 import warnings
+
 warnings.filterwarnings(
     "ignore",
     message=r"Failed to update characters: .*",
@@ -22,7 +24,25 @@ warnings.filterwarnings(
 logging.getLogger("genshin.utility.extdb").setLevel(logging.CRITICAL)
 logging.getLogger("genshin.client.components.chronicle.base").setLevel(logging.CRITICAL)
 
-load_dotenv()
+# ──────────────────────────────────────────────────────────────────────────────
+# ENV FILE LOADING: .env (local) → stack.env (Portainer Git) → Docker env
+# ──────────────────────────────────────────────────────────────────────────────
+BASE_DIR = Path(__file__).resolve().parent
+
+def load_env_files():
+    env_path = BASE_DIR / ".env"
+    stack_env_path = BASE_DIR / "stack.env"
+
+    if env_path.exists():
+        load_dotenv(env_path)
+        print("Loaded environment from .env", flush=True)
+    elif stack_env_path.exists():
+        load_dotenv(stack_env_path)
+        print("Loaded environment from stack.env", flush=True)
+    else:
+        print("No .env or stack.env found. Using Docker environment variables only.", flush=True)
+
+load_env_files()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # ENV / CONFIG
@@ -206,19 +226,35 @@ async def run_once():
     fields = [
         {"type": "mrkdwn", "text": f"*🔋 Resin*\n`{resin_now}/{resin_max}` — {eta_str(resin_eta)} to full"},
         {"type": "mrkdwn", "text": f"*🗺 Expeditions*\n`{exp_finished}/{exp_total}` finished"},
-        {"type": "mrkdwn", "text": f"*🫖 Teapot Coins*\n`{realm_currency}/{realm_max}` — {eta_str(realm_eta)} to cap" if realm_currency is not None else "*🫖 Teapot Coins*\n`N/A`"},
-        {"type": "mrkdwn", "text": f"*🌙 Abyss Reset (NA)*\n`{abyss_target.strftime('%Y-%m-%d %H:%M %Z')}` — in {abyss_eta}"},
+        {
+            "type": "mrkdwn",
+            "text": (
+                f"*🫖 Teapot Coins*\n`{realm_currency}/{realm_max}` — {eta_str(realm_eta)} to cap"
+                if realm_currency is not None
+                else "*🫖 Teapot Coins*\n`N/A`"
+            ),
+        },
+        {
+            "type": "mrkdwn",
+            "text": f"*🌙 Abyss Reset (NA)*\n`{abyss_target.strftime('%Y-%m-%d %H:%M %Z')}` — in {abyss_eta}",
+        },
         {"type": "mrkdwn", "text": f"*📝 Commissions*\n`{commissions_done}/{commissions_total}`"},
-        {"type": "mrkdwn", "text": f"*🎁 Commission Reward*\n{'✅ claimed' if commissions_claimed else '❌ not claimed'}"},
+        {
+            "type": "mrkdwn",
+            "text": f"*🎁 Commission Reward*\n{'✅ claimed' if commissions_claimed else '❌ not claimed'}",
+        },
     ]
 
     blocks = [
         {"type": "header", "text": {"type": "plain_text", "text": "Genshin Daily Notes", "emoji": True}},
-        {"type": "context", "elements": [
-            {"type": "mrkdwn", "text": f"*Time:* {now_utc}"},
-            {"type": "mrkdwn", "text": "*Server:* NA"},
-            {"type": "mrkdwn", "text": f"*UID:* `{GENSHIN_UID}`"}
-        ]},
+        {
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f"*Time:* {now_utc}"},
+                {"type": "mrkdwn", "text": "*Server:* NA"},
+                {"type": "mrkdwn", "text": f"*UID:* `{GENSHIN_UID}`"},
+            ],
+        },
         {"type": "divider"},
         {"type": "section", "fields": fields},
     ]
