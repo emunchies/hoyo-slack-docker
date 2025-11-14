@@ -5,13 +5,15 @@ import asyncio
 import datetime as dt
 import logging
 from zoneinfo import ZoneInfo
-from pathlib import Path  # <-- added
 
 import requests
 from dotenv import load_dotenv
 import genshin
 import warnings
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Suppress noisy character/extdb warnings from genshin.py
+# ──────────────────────────────────────────────────────────────────────────────
 warnings.filterwarnings(
     "ignore",
     message=r"Failed to update characters: .*",
@@ -19,30 +21,11 @@ warnings.filterwarnings(
     module="genshin.client.components.chronicle.base",
 )
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Quiet noisy genshin.py character/extdb logs (even though we don't use them)
 logging.getLogger("genshin.utility.extdb").setLevel(logging.CRITICAL)
 logging.getLogger("genshin.client.components.chronicle.base").setLevel(logging.CRITICAL)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# ENV FILE LOADING: .env (local) → stack.env (Portainer Git) → Docker env
-# ──────────────────────────────────────────────────────────────────────────────
-BASE_DIR = Path(__file__).resolve().parent
-
-def load_env_files():
-    env_path = BASE_DIR / ".env"
-    stack_env_path = BASE_DIR / "stack.env"
-
-    if env_path.exists():
-        load_dotenv(env_path)
-        print("Loaded environment from .env", flush=True)
-    elif stack_env_path.exists():
-        load_dotenv(stack_env_path)
-        print("Loaded environment from stack.env", flush=True)
-    else:
-        print("No .env or stack.env found. Using Docker environment variables only.", flush=True)
-
-load_env_files()
+# Load .env if present (Docker env vars still work fine even if this file is missing)
+load_dotenv()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # ENV / CONFIG
@@ -52,12 +35,15 @@ LTOKEN_V2 = os.getenv("LTOKEN_V2")
 LTUID_V2  = os.getenv("LTUID_V2")
 GENSHIN_UID = int(os.getenv("GENSHIN_UID", "0"))
 
-# run cadence (hours)
-SCHEDULE_HOURS = int(os.getenv("SCHEDULE_HOURS", "5"))
+# run cadence (hours) – default 1 hour
+SCHEDULE_HOURS = int(os.getenv("SCHEDULE_HOURS", "1"))
 POST_ON_START = os.getenv("POST_ON_START", "true").lower() in ("1", "true", "yes")
 
 # resin alert thresholds (once per day per threshold)
-RESIN_ALERTS = [int(x) for x in os.getenv("RESIN_ALERT_THRESHOLDS", "120,160").split(",") if x.strip()]
+RESIN_ALERTS = [
+    int(x) for x in os.getenv("RESIN_ALERT_THRESHOLDS", "120,160").split(",")
+    if x.strip()
+]
 
 # simple state persistence
 DATA_DIR = os.getenv("DATA_DIR", "/data")
@@ -69,7 +55,7 @@ NA_TZ = ZoneInfo("America/New_York")
 # ──────────────────────────────────────────────────────────────────────────────
 # UTIL / STATE / SLACK
 # ──────────────────────────────────────────────────────────────────────────────
-def _ensure_dir(p):
+def _ensure_dir(p: str):
     try:
         os.makedirs(p, exist_ok=True)
     except Exception:
@@ -150,6 +136,7 @@ def next_abyss_reset_na():
     """Abyss resets on the 1st & 16th at 04:00 NA server time."""
     now = dt.datetime.now(NA_TZ)
     y, m, d = now.year, now.month, now.day
+
     if d < 1 or (d == 1 and now.hour < 4):
         target = dt.datetime(y, m, 1, 4, 0, tzinfo=NA_TZ)
     elif d < 16 or (d == 16 and now.hour < 4):
@@ -160,6 +147,7 @@ def next_abyss_reset_na():
         else:
             y2, m2 = y, m + 1
         target = dt.datetime(y2, m2, 1, 4, 0, tzinfo=NA_TZ)
+
     return target, target - now
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -175,7 +163,9 @@ def maybe_fire_resin_alerts(resin_now: int, state):
         k = str(thr)
         already = state["resin_alerts"][day_key].get(k, False)
         if not already and resin_now >= thr:
-            post_slack_text(f"🔔 *Resin Alert*: You’ve reached **{thr}** resin (current: {resin_now}).")
+            post_slack_text(
+                f"🔔 *Resin Alert*: You’ve reached **{thr}** resin (current: {resin_now})."
+            )
             state["resin_alerts"][day_key][k] = True
             fired_any = True
 
@@ -222,15 +212,21 @@ async def run_once():
     # Timestamp (UTC)
     now_utc = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    # Slack Blocks (no check-in, no transformer)
+    # Slack Blocks (no check-in, no transformer, no character summary)
     fields = [
-        {"type": "mrkdwn", "text": f"*🔋 Resin*\n`{resin_now}/{resin_max}` — {eta_str(resin_eta)} to full"},
-        {"type": "mrkdwn", "text": f"*🗺 Expeditions*\n`{exp_finished}/{exp_total}` finished"},
+        {
+            "type": "mrkdwn",
+            "text": f"*🔋 Resin*\n`{resin_now}/{resin_max}` — {eta_str(resin_eta)} to full",
+        },
+        {
+            "type": "mrkdwn",
+            "text": f"*🗺 Expeditions*\n`{exp_finished}/{exp_total}` finished",
+        },
         {
             "type": "mrkdwn",
             "text": (
                 f"*🫖 Teapot Coins*\n`{realm_currency}/{realm_max}` — {eta_str(realm_eta)} to cap"
-                if realm_currency is not None
+                if realm_currency is not None and realm_max is not None
                 else "*🫖 Teapot Coins*\n`N/A`"
             ),
         },
@@ -238,7 +234,10 @@ async def run_once():
             "type": "mrkdwn",
             "text": f"*🌙 Abyss Reset (NA)*\n`{abyss_target.strftime('%Y-%m-%d %H:%M %Z')}` — in {abyss_eta}",
         },
-        {"type": "mrkdwn", "text": f"*📝 Commissions*\n`{commissions_done}/{commissions_total}`"},
+        {
+            "type": "mrkdwn",
+            "text": f"*📝 Commissions*\n`{commissions_done}/{commissions_total}`",
+        },
         {
             "type": "mrkdwn",
             "text": f"*🎁 Commission Reward*\n{'✅ claimed' if commissions_claimed else '❌ not claimed'}",
@@ -246,7 +245,10 @@ async def run_once():
     ]
 
     blocks = [
-        {"type": "header", "text": {"type": "plain_text", "text": "Genshin Daily Notes", "emoji": True}},
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "Genshin Daily Notes", "emoji": True},
+        },
         {
             "type": "context",
             "elements": [
