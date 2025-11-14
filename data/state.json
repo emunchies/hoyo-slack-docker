@@ -1,0 +1,11 @@
+{
+  "resin_alerts": {
+    "2025-11-07": {
+      "120": true,
+      "160": true
+    }
+  },
+  "checkin": {
+    "2025-11-07": "check-in failed: 'Client' object has no attribute 'get_daily_reward_info'"
+  }
+}
