@@ -1,12 +1,24 @@
+version: "3.8"
+
 services:
   hoyo-slack:
     build: .
     container_name: hoyo-slack
+    # 👇 No env_file here – secrets stay in Portainer, not in GitHub
     environment:
-      SCHEDULE_HOURS: "5"
+      # Required secrets (set values in Portainer UI, not in this file)
+      SLACK_WEBHOOK_URL: ""
+      LTOKEN_V2: ""
+      LTUID_V2: ""
+      GENSHIN_UID: "660844071"  # you can also leave this blank and set in UI
+
+      # Optional config (you can change these in Portainer too)
+      SCHEDULE_HOURS: "1"           # run every hour
       RESIN_ALERT_THRESHOLDS: "120,160"
       DATA_DIR: "/data"
-      CHARACTER_SUMMARY_TOP: "0"   # set to e.g. "4" to include top 4 characters
+      POST_ON_START: "true"
+
     volumes:
       - ./data:/data
+
     restart: unless-stopped
