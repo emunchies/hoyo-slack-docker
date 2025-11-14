@@ -10,7 +10,7 @@ services:
       SLACK_WEBHOOK_URL: ""
       LTOKEN_V2: ""
       LTUID_V2: ""
-      GENSHIN_UID: "660844071"  # you can also leave this blank and set in UI
+      GENSHIN_UID: ""  # you can also leave this blank and set in UI
 
       # Optional config (you can change these in Portainer too)
       SCHEDULE_HOURS: "1"           # run every hour
