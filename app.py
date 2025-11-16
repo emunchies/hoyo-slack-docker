@@ -5,6 +5,7 @@ import asyncio
 import datetime as dt
 import logging
 from zoneinfo import ZoneInfo
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
@@ -12,7 +13,7 @@ import genshin
 import warnings
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Suppress noisy character/extdb warnings from genshin.py
+# Suppress noisy genshin.py warnings about character DB updates (we don't use them)
 # ──────────────────────────────────────────────────────────────────────────────
 warnings.filterwarnings(
     "ignore",
@@ -20,12 +21,23 @@ warnings.filterwarnings(
     category=UserWarning,
     module="genshin.client.components.chronicle.base",
 )
-
 logging.getLogger("genshin.utility.extdb").setLevel(logging.CRITICAL)
 logging.getLogger("genshin.client.components.chronicle.base").setLevel(logging.CRITICAL)
 
-# Load .env if present (Docker env vars still work fine even if this file is missing)
-load_dotenv()
+# ──────────────────────────────────────────────────────────────────────────────
+# ENV LOADING: try .env or stack.env inside the container
+# ──────────────────────────────────────────────────────────────────────────────
+def load_env_like():
+    ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+    for name in (".env", "stack.env"):
+        p = Path(name)
+        if p.exists():
+            load_dotenv(p)
+            print(f"{ts} | Loaded environment from {p}", flush=True)
+            return
+    print(f"{ts} | No .env or stack.env found. Using Docker environment variables only.", flush=True)
+
+load_env_like()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # ENV / CONFIG
@@ -33,7 +45,46 @@ load_dotenv()
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 LTOKEN_V2 = os.getenv("LTOKEN_V2")
 LTUID_V2  = os.getenv("LTUID_V2")
-GENSHIN_UID = int(os.getenv("GENSHIN_UID", "0"))
+
+# Support either:
+#   GENSHIN_UIDS = "uid1,uid2,..."
+# or legacy:
+#   GENSHIN_UID = "uid"
+uids_raw = (
+    os.getenv("GENSHIN_UIDS")
+    or os.getenv("GENSHIN_UID")
+    or ""
+).strip()
+
+GENSHIN_UIDS: list[int] = []
+if uids_raw:
+    for part in uids_raw.replace(" ", "").split(","):
+        if not part:
+            continue
+        try:
+            GENSHIN_UIDS.append(int(part))
+        except ValueError:
+            # Ignore any invalid entries instead of crashing
+            continue
+
+# ── Basic sanity checks ──
+errors = []
+
+if not SLACK_WEBHOOK_URL:
+    errors.append("SLACK_WEBHOOK_URL is not set.")
+
+if not LTOKEN_V2:
+    errors.append("LTOKEN_V2 is not set. Paste your ltoken_v2 cookie value into this env var.")
+
+if not LTUID_V2 or LTUID_V2.strip().lower() == "none":
+    errors.append("LTUID_V2 is missing/invalid. It must be your numeric HoYoLab user ID (ltuid_v2 cookie).")
+
+if not GENSHIN_UIDS:
+    errors.append("No valid GENSHIN_UIDS / GENSHIN_UID configured. "
+                  "Set e.g. GENSHIN_UIDS=660844071,123456789")
+
+if errors:
+    raise RuntimeError("Config error:\n - " + "\n - ".join(errors))
 
 # run cadence (hours) – default 1 hour
 SCHEDULE_HOURS = int(os.getenv("SCHEDULE_HOURS", "1"))
@@ -41,8 +92,7 @@ POST_ON_START = os.getenv("POST_ON_START", "true").lower() in ("1", "true", "yes
 
 # resin alert thresholds (once per day per threshold)
 RESIN_ALERTS = [
-    int(x) for x in os.getenv("RESIN_ALERT_THRESHOLDS", "120,160").split(",")
-    if x.strip()
+    int(x) for x in os.getenv("RESIN_ALERT_THRESHOLDS", "120,160").split(",") if x.strip()
 ]
 
 # simple state persistence
@@ -61,7 +111,7 @@ def _ensure_dir(p: str):
     except Exception:
         pass
 
-def load_state():
+def load_state() -> dict:
     _ensure_dir(DATA_DIR)
     if not os.path.exists(STATE_PATH):
         return {}
@@ -71,14 +121,14 @@ def load_state():
     except Exception:
         return {}
 
-def save_state(state):
+def save_state(state: dict):
     _ensure_dir(DATA_DIR)
     tmp = STATE_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
     os.replace(tmp, STATE_PATH)
 
-def today_na_str():
+def today_na_str() -> str:
     return dt.datetime.now(NA_TZ).strftime("%Y-%m-%d")
 
 def post_slack_text(text: str):
@@ -97,7 +147,7 @@ def post_slack_blocks(blocks: list, fallback: str = "Update"):
 # ──────────────────────────────────────────────────────────────────────────────
 # TIME HELPERS
 # ──────────────────────────────────────────────────────────────────────────────
-def convert_recovery(value):
+def convert_recovery(value) -> int:
     """
     Normalize HoYoLab recovery fields to seconds remaining.
     Accepts datetime (aware/naive, ready-at), dict {Day,Hour,Minute,Second},
@@ -124,7 +174,7 @@ def convert_recovery(value):
     except Exception:
         return 0
 
-def eta_str(seconds):
+def eta_str(seconds) -> str:
     seconds = convert_recovery(seconds)
     if seconds <= 0:
         return "ready"
@@ -147,13 +197,24 @@ def next_abyss_reset_na():
         else:
             y2, m2 = y, m + 1
         target = dt.datetime(y2, m2, 1, 4, 0, tzinfo=NA_TZ)
-
     return target, target - now
 
 # ──────────────────────────────────────────────────────────────────────────────
 # FEATURES
 # ──────────────────────────────────────────────────────────────────────────────
-def maybe_fire_resin_alerts(resin_now: int, state):
+def maybe_fire_resin_alerts(resin_now: int, state: dict):
+    """
+    Fire per-day resin alerts once per threshold.
+    State shape:
+    {
+      "resin_alerts": {
+        "YYYY-MM-DD": {
+          "120": true,
+          "160": true
+        }
+      }
+    }
+    """
     day_key = today_na_str()
     state.setdefault("resin_alerts", {})
     state["resin_alerts"].setdefault(day_key, {})
@@ -163,9 +224,7 @@ def maybe_fire_resin_alerts(resin_now: int, state):
         k = str(thr)
         already = state["resin_alerts"][day_key].get(k, False)
         if not already and resin_now >= thr:
-            post_slack_text(
-                f"🔔 *Resin Alert*: You’ve reached **{thr}** resin (current: {resin_now})."
-            )
+            post_slack_text(f"🔔 *Resin Alert*: You’ve reached **{thr}** resin (current: {resin_now}).")
             state["resin_alerts"][day_key][k] = True
             fired_any = True
 
@@ -179,89 +238,94 @@ async def run_once():
     state = load_state()
     client = genshin.Client(cookies={"ltoken_v2": LTOKEN_V2, "ltuid_v2": LTUID_V2})
 
-    # Daily Notes
-    notes = await client.get_genshin_notes(GENSHIN_UID)
+    for uid in GENSHIN_UIDS:
+        # Daily Notes for this UID
+        notes = await client.get_genshin_notes(uid)
 
-    # Resin
-    resin_now = notes.current_resin
-    resin_max = notes.max_resin
-    resin_eta = convert_recovery(notes.resin_recovery_time)
+        # Resin
+        resin_now = notes.current_resin
+        resin_max = notes.max_resin
+        resin_eta = convert_recovery(notes.resin_recovery_time)
 
-    # Alerts
-    maybe_fire_resin_alerts(resin_now, state)
+        # Alerts
+        maybe_fire_resin_alerts(resin_now, state)
 
-    # Commissions
-    commissions_done = getattr(notes, "finished_commissions", 0) or 0
-    commissions_total = getattr(notes, "max_commissions", 4) or 4
-    commissions_claimed = bool(getattr(notes, "claimed_commission_reward", False))
+        # Commissions
+        commissions_done = getattr(notes, "finished_commissions", 0) or 0
+        commissions_total = getattr(notes, "max_commissions", 4) or 4
+        commissions_claimed = bool(getattr(notes, "claimed_commission_reward", False))
 
-    # Expeditions
-    expeditions = notes.expeditions or []
-    exp_finished = sum(1 for e in expeditions if getattr(e, "finished", False))
-    exp_total = len(expeditions)
+        # Expeditions
+        expeditions = notes.expeditions or []
+        exp_finished = sum(1 for e in expeditions if getattr(e, "finished", False))
+        exp_total = len(expeditions)
 
-    # Teapot
-    realm_currency = getattr(notes, "current_realm_currency", None)
-    realm_max = getattr(notes, "max_realm_currency", None)
-    realm_eta = convert_recovery(getattr(notes, "realm_currency_recovery_time", None))
+        # Teapot
+        realm_currency = getattr(notes, "current_realm_currency", None)
+        realm_max = getattr(notes, "max_realm_currency", None)
+        realm_eta = convert_recovery(getattr(notes, "realm_currency_recovery_time", None))
 
-    # Abyss
-    abyss_target, abyss_delta = next_abyss_reset_na()
-    abyss_eta = eta_str(int(abyss_delta.total_seconds())).replace("in ~", "")
+        # Abyss
+        abyss_target, abyss_delta = next_abyss_reset_na()
+        abyss_eta = eta_str(int(abyss_delta.total_seconds())).replace("in ~", "")
 
-    # Timestamp (UTC)
-    now_utc = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        # Timestamp (UTC)
+        now_utc = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    # Slack Blocks (no check-in, no transformer, no character summary)
-    fields = [
-        {
-            "type": "mrkdwn",
-            "text": f"*🔋 Resin*\n`{resin_now}/{resin_max}` — {eta_str(resin_eta)} to full",
-        },
-        {
-            "type": "mrkdwn",
-            "text": f"*🗺 Expeditions*\n`{exp_finished}/{exp_total}` finished",
-        },
-        {
-            "type": "mrkdwn",
-            "text": (
-                f"*🫖 Teapot Coins*\n`{realm_currency}/{realm_max}` — {eta_str(realm_eta)} to cap"
-                if realm_currency is not None and realm_max is not None
-                else "*🫖 Teapot Coins*\n`N/A`"
-            ),
-        },
-        {
-            "type": "mrkdwn",
-            "text": f"*🌙 Abyss Reset (NA)*\n`{abyss_target.strftime('%Y-%m-%d %H:%M %Z')}` — in {abyss_eta}",
-        },
-        {
-            "type": "mrkdwn",
-            "text": f"*📝 Commissions*\n`{commissions_done}/{commissions_total}`",
-        },
-        {
-            "type": "mrkdwn",
-            "text": f"*🎁 Commission Reward*\n{'✅ claimed' if commissions_claimed else '❌ not claimed'}",
-        },
-    ]
+        # Slack Blocks (no check-in, no transformer, no character summary)
+        fields = [
+            {
+                "type": "mrkdwn",
+                "text": f"*🔋 Resin*\n`{resin_now}/{resin_max}` — {eta_str(resin_eta)} to full",
+            },
+            {
+                "type": "mrkdwn",
+                "text": f"*🗺 Expeditions*\n`{exp_finished}/{exp_total}` finished",
+            },
+            {
+                "type": "mrkdwn",
+                "text": (
+                    f"*🫖 Teapot Coins*\n`{realm_currency}/{realm_max}` — {eta_str(realm_eta)} to cap"
+                    if realm_currency is not None
+                    else "*🫖 Teapot Coins*\n`N/A`"
+                ),
+            },
+            {
+                "type": "mrkdwn",
+                "text": f"*🌙 Abyss Reset (NA)*\n`{abyss_target.strftime('%Y-%m-%d %H:%M %Z')}` — in {abyss_eta}",
+            },
+            {
+                "type": "mrkdwn",
+                "text": f"*📝 Commissions*\n`{commissions_done}/{commissions_total}`",
+            },
+            {
+                "type": "mrkdwn",
+                "text": f"*🎁 Commission Reward*\n{'✅ claimed' if commissions_claimed else '❌ not claimed'}",
+            },
+        ]
 
-    blocks = [
-        {
-            "type": "header",
-            "text": {"type": "plain_text", "text": "Genshin Daily Notes", "emoji": True},
-        },
-        {
-            "type": "context",
-            "elements": [
-                {"type": "mrkdwn", "text": f"*Time:* {now_utc}"},
-                {"type": "mrkdwn", "text": "*Server:* NA"},
-                {"type": "mrkdwn", "text": f"*UID:* `{GENSHIN_UID}`"},
-            ],
-        },
-        {"type": "divider"},
-        {"type": "section", "fields": fields},
-    ]
+        blocks = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"Genshin Daily Notes — {uid}",
+                    "emoji": True,
+                },
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": f"*Time:* {now_utc}"},
+                    {"type": "mrkdwn", "text": "*Server:* NA"},
+                    {"type": "mrkdwn", "text": f"*UID:* `{uid}`"},
+                ],
+            },
+            {"type": "divider"},
+            {"type": "section", "fields": fields},
+        ]
 
-    post_slack_blocks(blocks, fallback="Genshin Daily Notes")
+        post_slack_blocks(blocks, fallback=f"Genshin Daily Notes ({uid})")
 
 def main_loop():
     if POST_ON_START:
